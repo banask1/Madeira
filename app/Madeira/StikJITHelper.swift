@@ -212,6 +212,27 @@ enum StikJITHelper {
     // 0 treats JIT as ready whenever CS_DEBUGGED is set, as before, without asking whether a debugger is attached.
     private static let attachCheck = MadeiraConfig.flag("MADEIRA_JIT_ATTACH_CHECK")
 
+    /// iOS 18 and earlier (no TXM): map the JIT pool in-process when the
+    /// debugger does not answer the BRK. The BRK protocol the pool normally
+    /// comes from is iOS 26 / TXM only, so on 18.x the pool could never be
+    /// made. 0 keeps the BRK path only.
+    private static let selfPoolAllowed = MadeiraConfig.flag("MADEIRA_JIT_SELF_POOL")
+
+    /// The pool the process maps for itself on iOS 18 and earlier: the same
+    /// dual-mapped RWX pool the BRK path produces, created without a
+    /// debugger. nil when the kernel refuses an executable mapping.
+    private static func allocateSelfPool(poolSize: Int) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
+        var rx: UnsafeMutableRawPointer? = nil
+        var rw: UnsafeMutableRawPointer? = nil
+        let ok = jit_pool_self_allocated(poolSize, &rx, &rw)
+        guard ok, let rx, let rw else {
+            LogStore.shared.log("[jit-debugger] the process could not map its own executable memory "
+                + "(CS_DEBUGGED is set, but the kernel refused the RWX mapping)", level: .error)
+            return nil
+        }
+        return (rx, rw, poolSize)
+    }
+
     /// JIT can serve a launch: CS_DEBUGGED is set, and either a debugger is
     /// attached to answer the pool request or this run's pool exists already.
     /// CS_DEBUGGED alone is not enough: it stays set after a debugger leaves, which
@@ -825,6 +846,27 @@ enum StikJITHelper {
                         LogStore.shared.log("[pool-split] ml1036 pair fallback failed: no pool region", level: .error)
                     }
                 }
+            }
+        }
+        // iOS 18 and earlier (no TXM): the pool normally comes from the
+        // debugger's BRK protocol (BRK #0xf00d), which is iOS 26 / TXM only.
+        // On 18.x nothing answers it, so the pool could never exist and every
+        // launch stopped with "JIT pool allocation FAILED -- not starting
+        // Wine". A CS_DEBUGGED process may map executable memory itself
+        // there, and that mapping is the same pool the BRK path produces.
+        // Tried only after the debugger did not answer, so iOS 26 is
+        // untouched.
+        if rxPtrOpt == nil, requestUnanswered, !debuggerAttached, Self.selfPoolAllowed {
+            if let selfPool = Self.allocateSelfPool(poolSize: poolSize) {
+                let a = vm_address_t(bitPattern: selfPool.rx)
+                let inGuest = a + vm_address_t(poolSize) > guestLo && a < guestHi
+                if a >= goodLow && !inGuest && !overlapsExeWindow(a, vm_address_t(poolSize)) {
+                    LogStore.shared.log(String(format: "[jit-debugger] self-allocated JIT pool: RX=0x%lx RW=0x%lx %ldMB "
+                        + "(no debugger needed; the iOS 18 path)", a, Int(bitPattern: selfPool.rw), poolSize / 1024 / 1024), level: .success)
+                    poolTaken = true
+                    return selfPool
+                }
+                LogStore.shared.log(String(format: "[jit-debugger] the self-allocated pool landed at 0x%lx -- not usable here", a), level: .error)
             }
         }
         guard let rxPtr = rxPtrOpt else {
@@ -1659,6 +1701,15 @@ enum StikJITHelper {
 
     /// Detach the debugger. Call this after Wine is done loading PE DLLs.
     static func detachDebugger() {
+        // iOS 18 and earlier (no TXM): there is no debugger to detach from.
+        // jit26_detach() is a BRK #0xf00d, the iOS 26 protocol; on 18.x
+        // nothing answers it, so the call is skipped instead of leaving an
+        // unanswered trap behind.
+        guard isDebuggerAttached() else {
+            LogStore.shared.log("No debugger is attached (iOS 18 path) -- nothing to detach.")
+            setenv("MADEIRA_DETACHED", "1", 1)
+            return
+        }
         LogStore.shared.log("Detaching debugger...")
         jit26_detach()
         // task #34: signal in-process waiters (share-probe poller). CS_DEBUGGED
