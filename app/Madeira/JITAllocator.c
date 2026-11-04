@@ -485,6 +485,42 @@ bool jit_check_debugged(void) {
     return debugged;
 }
 
+// iOS 18 and earlier (no TXM): a CS_DEBUGGED process may map executable
+// memory itself, so the JIT pool does not have to come from the debugger's
+// BRK protocol (BRK #0xf00d is iOS 26 / TXM only, and nothing on 18.x
+// answers it). This creates the same dual-mapped RWX pool the BRK path
+// produces, from the process's own mappings.
+//
+// The region is never destroyed: the pool lives for the whole app run, and
+// the memory entry has to stay open for the RX view to stay valid.
+static JITRegion *selfPoolRegion = NULL;
+
+bool jit_pool_self_allocated(size_t size, void **rxOut, void **rwOut) {
+    if (rxOut) *rxOut = NULL;
+    if (rwOut) *rwOut = NULL;
+    if (!jit_check_debugged()) {
+        jit_log("self-allocated pool: CS_DEBUGGED is not set, the kernel would refuse an executable mapping");
+        return false;
+    }
+    if (selfPoolRegion) {
+        if (rxOut) *rxOut = jit_region_rx_ptr(selfPoolRegion);
+        if (rwOut) *rwOut = jit_region_rw_ptr(selfPoolRegion);
+        return true;
+    }
+    JITRegion *region = jit_region_create(size);
+    if (!region) {
+        jit_log("self-allocated pool: jit_region_create failed");
+        return false;
+    }
+    selfPoolRegion = region;
+    void *rx = jit_region_rx_ptr(region);
+    void *rw = jit_region_rw_ptr(region);
+    jit_log("self-allocated pool: RX=%p RW=%p size=%zu (no debugger involved)", rx, rw, jit_region_size(region));
+    if (rxOut) *rxOut = rx;
+    if (rwOut) *rwOut = rw;
+    return true;
+}
+
 bool jit_test_mapping(void) {
     jit_log("=== JIT Mapping Test (non-executing) ===");
 
