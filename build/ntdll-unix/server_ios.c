@@ -5569,14 +5569,38 @@ static int init_thread_pipe(void)
 {
     int reply_pipe[2];
     stack_t ss;
+    void *madeira_sstack;
+    struct ntdll_thread_data *madeira_td;
+    int madeira_sigret;
 
-    ss.ss_sp    = get_signal_stack();
+    /* ml-diag1: this function is where every launch of this build stops, and the
+     * crash is caught by the wineserver SIGSEGV handler, which cannot say which
+     * line. Log every step so the next log names it. */
+    wine_log_write("[pipe-diag] enter thread=%p rev=ml-diag1", (void *)pthread_self());
+    madeira_sstack = get_signal_stack();
+    wine_log_write("[pipe-diag] signal_stack=%p size=%d rev=ml-diag1", madeira_sstack, (int)signal_stack_size);
+
+    ss.ss_sp    = madeira_sstack;
     ss.ss_size  = signal_stack_size;
     ss.ss_flags = 0;
-    sigaltstack( &ss, NULL );
+    errno = 0;
+    madeira_sigret = sigaltstack( &ss, NULL );
+    wine_log_write("[pipe-diag] sigaltstack ret=%d errno=%d rev=ml-diag1", madeira_sigret, errno);
+
+    madeira_td = ntdll_get_thread_data();
+    wine_log_write("[pipe-diag] thread_data=%p wait_fd=%p rev=ml-diag1",
+                   (void *)madeira_td, madeira_td ? (void *)madeira_td->wait_fd : NULL);
+    if (!madeira_td)
+    {
+        wine_log_write("[pipe-diag] FATAL thread_data is NULL rev=ml-diag1");
+        server_protocol_perror( "no thread data" );
+    }
 
     if (server_pipe( reply_pipe ) == -1) server_protocol_perror( "pipe" );
-    if (server_pipe( ntdll_get_thread_data()->wait_fd ) == -1) server_protocol_perror( "pipe" );
+    wine_log_write("[pipe-diag] reply_pipe=%d/%d rev=ml-diag1", reply_pipe[0], reply_pipe[1]);
+
+    if (server_pipe( madeira_td->wait_fd ) == -1) server_protocol_perror( "pipe" );
+    wine_log_write("[pipe-diag] wait_fd=%d/%d rev=ml-diag1", madeira_td->wait_fd[0], madeira_td->wait_fd[1]);
 #ifdef WINE_IOS
     {
         void *peb = ios_jit_current_peb();
@@ -6467,7 +6491,9 @@ size_t server_init_process(void)
     data->request_fd = wine_server_receive_fd( &version );
 #ifdef WINE_IOS
     wine_log_write("[Wine init_process] got request_fd=%d, version=%d (expected %d)", data->request_fd, version, SERVER_PROTOCOL_VERSION);
+    wine_log_write("[pipe-diag] before fdt_reg rev=ml-diag1");
     ios_fdt_reg( data->request_fd, FDT_REQUEST_WR, ios_jit_current_peb() );
+    wine_log_write("[pipe-diag] after fdt_reg rev=ml-diag1");
 #endif
 
 #ifdef SO_PASSCRED
