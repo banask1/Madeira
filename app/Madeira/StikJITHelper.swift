@@ -759,7 +759,15 @@ enum StikJITHelper {
 
         var rxPtrOpt: UnsafeMutableRawPointer? = nil
         var requestUnanswered = false
-        for attempt in 0..<3 {
+        // iOS 18 and earlier: nothing can answer BRK #0xf00d (that protocol is
+        // iOS 26 / TXM only). Firing it anyway suspends the task and runs the
+        // SIGTRAP handler immediately before ntdll's init_thread_pipe() installs
+        // its alternate signal stack. Take the in-process pool without the BRK.
+        if !debuggerAttached, Self.selfPoolAllowed {
+            requestUnanswered = true
+            LogStore.shared.log("[jit-debugger] no debugger attached: skipping the BRK pool request (iOS 18 in-process path)", level: .success)
+        }
+        for attempt in 0..<3 where !requestUnanswered {
             guard let p = jit26_prepare_region(nil, poolSize), p != UnsafeMutableRawPointer(bitPattern: 0) else {
                 LogStore.shared.log("Debugger failed to allocate RX memory (attempt \(attempt))", level: .error)
                 requestUnanswered = true
