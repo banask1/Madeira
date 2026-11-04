@@ -269,6 +269,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Apply iOS 18.5 port patch
+        run: |
+          python3 - <<'PYEOF'
+          p='app/Madeira.xcodeproj/project.pbxproj'
+          s=open(p, encoding='utf-8', errors='replace').read()
+          before=s
+          s=s.replace('IPHONEOS_DEPLOYMENT_TARGET = 26.0;','IPHONEOS_DEPLOYMENT_TARGET = 18.0;')
+          s=s.replace('Add :MinimumOSVersion string 26.0','Add :MinimumOSVersion string 18.0')
+          assert s!=before, 'patch did not match anything'
+          open(p,'w',encoding='utf-8',newline='').write(s)
+          print('iOS 18.5 port patch applied')
+          PYEOF
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: cache-llvm
