@@ -79,6 +79,14 @@ void *jit26_prepare_region(void *addr, size_t len);
 // iOS 26 BRK-based protocol: Tell the debugger to detach.
 void jit26_detach(void);
 
+// iOS 18 and earlier (no TXM): the kernel lets a CS_DEBUGGED process map
+// executable memory itself, so the JIT pool does not have to come from the
+// debugger's BRK protocol (BRK #0xf00d is iOS 26 / TXM only). Creates the
+// same dual-mapped RWX pool the BRK path produces and reports both views.
+// The region is kept for the life of the process. Returns false when the
+// kernel refuses an executable mapping.
+bool jit_pool_self_allocated(size_t size, void **rxOut, void **rwOut);
+
 // Test if dual-mapped regions can be created and RX pages are viable,
 // WITHOUT actually executing generated code (safe to call without JIT).
 // Returns true if dual mapping works and RX pages have execute permission.
