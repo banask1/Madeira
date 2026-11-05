@@ -5262,39 +5262,32 @@ int server_pipe( int fd[2] )
     int ret;
 #ifdef WINE_IOS
     int madeira_err;
-    wine_log_write("[pipe-p] enter fd=%p rev=ml-segv2", (void *)fd);
-#endif
+
+    /* ml-segv3: this SDK annotates pipe2 as "introduced in iOS 27.0". The call
+     * sits exactly where every launch dies, so don't rely on it: pipe()+fcntl
+     * is the same thing without a symbol the device may not have. */
+    wine_log_write("[pipe-p] enter fd=%p rev=ml-segv3", (void *)fd);
+    errno = 0;
+    ret = pipe( fd );
+    madeira_err = errno;
+    wine_log_write("[pipe-p] pipe ret=%d errno=%d rev=ml-segv3", ret, madeira_err);
+    if (!ret)
+    {
+        wine_log_write("[pipe-p] before fcntl rev=ml-segv3");
+        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
+        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+        wine_log_write("[pipe-p] after fcntl fd=%d/%d rev=ml-segv3", fd[0], fd[1]);
+    }
+#else
 #ifdef HAVE_PIPE2
     static BOOL have_pipe2 = TRUE;
 
     if (have_pipe2)
     {
-#ifdef WINE_IOS
-        errno = 0;
-        ret = pipe2( fd, O_CLOEXEC );
-        madeira_err = errno;
-        wine_log_write("[pipe-p] pipe2 ret=%d errno=%d rev=ml-segv2", ret, madeira_err);
-        if (!ret) return ret;
-        if (madeira_err == ENOSYS || madeira_err == EINVAL) have_pipe2 = FALSE;
-#else
         if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
         if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
-#endif
     }
 #endif
-#ifdef WINE_IOS
-    errno = 0;
-    ret = pipe( fd );
-    madeira_err = errno;
-    wine_log_write("[pipe-p] pipe ret=%d errno=%d rev=ml-segv2", ret, madeira_err);
-    if (!ret)
-    {
-        wine_log_write("[pipe-p] before fcntl rev=ml-segv2");
-        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
-        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
-        wine_log_write("[pipe-p] after fcntl rev=ml-segv2");
-    }
-#else
     if (!(ret = pipe( fd )))
     {
         fcntl( fd[0], F_SETFD, FD_CLOEXEC );
@@ -5593,6 +5586,10 @@ static int get_unix_tid(void)
  * Create the server->client communication pipe.
  */
 #ifdef WINE_IOS
+/* Darwin's ucontext.h refuses to be included unless an X/Open level is set. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 600
+#endif
 #include <ucontext.h>
 #include <signal.h>
 #include <string.h>
