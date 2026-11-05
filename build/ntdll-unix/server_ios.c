@@ -5260,20 +5260,47 @@ NTSTATUS unixcall_wine_server_handle_to_fd( void *args )
 int server_pipe( int fd[2] )
 {
     int ret;
+#ifdef WINE_IOS
+    int madeira_err;
+    wine_log_write("[pipe-p] enter fd=%p rev=ml-segv2", (void *)fd);
+#endif
 #ifdef HAVE_PIPE2
     static BOOL have_pipe2 = TRUE;
 
     if (have_pipe2)
     {
+#ifdef WINE_IOS
+        errno = 0;
+        ret = pipe2( fd, O_CLOEXEC );
+        madeira_err = errno;
+        wine_log_write("[pipe-p] pipe2 ret=%d errno=%d rev=ml-segv2", ret, madeira_err);
+        if (!ret) return ret;
+        if (madeira_err == ENOSYS || madeira_err == EINVAL) have_pipe2 = FALSE;
+#else
         if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
         if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
+#endif
     }
 #endif
+#ifdef WINE_IOS
+    errno = 0;
+    ret = pipe( fd );
+    madeira_err = errno;
+    wine_log_write("[pipe-p] pipe ret=%d errno=%d rev=ml-segv2", ret, madeira_err);
+    if (!ret)
+    {
+        wine_log_write("[pipe-p] before fcntl rev=ml-segv2");
+        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
+        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+        wine_log_write("[pipe-p] after fcntl rev=ml-segv2");
+    }
+#else
     if (!(ret = pipe( fd )))
     {
         fcntl( fd[0], F_SETFD, FD_CLOEXEC );
         fcntl( fd[1], F_SETFD, FD_CLOEXEC );
     }
+#endif
     return ret;
 }
 
@@ -5565,6 +5592,74 @@ static int get_unix_tid(void)
  *
  * Create the server->client communication pipe.
  */
+#ifdef WINE_IOS
+#include <ucontext.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+/* ml-segv2: wineserver's do_sigsegv (server/signal.c) is installed process-wide on
+ * Apple, so a fault in ANY thread prints "wineserver crashed" and abort()s with no
+ * address. Take the handler back and say where the fault really is. */
+static volatile int madeira_segv_busy;
+
+static void madeira_segv_report( int signum, siginfo_t *info, void *uctx )
+{
+    char buf[512];
+    int n;
+    unsigned long pc = 0, lr = 0, fp = 0, sp = 0;
+    ucontext_t *uc = (ucontext_t *)uctx;
+    int i;
+
+    if (madeira_segv_busy) _exit( 78 );   /* fault inside the reporter: don't loop */
+    madeira_segv_busy = 1;
+
+    if (uc)
+    {
+        pc = (unsigned long)uc->uc_mcontext->__ss.__pc;
+        lr = (unsigned long)uc->uc_mcontext->__ss.__lr;
+        fp = (unsigned long)uc->uc_mcontext->__ss.__fp;
+        sp = (unsigned long)uc->uc_mcontext->__ss.__sp;
+    }
+    /* raw write() only: no log mutex, this may fire while another thread holds it */
+    n = snprintf( buf, sizeof(buf),
+                  "[segv] sig=%d code=%d addr=%p pc=%p lr=%p fp=%p sp=%p self=%p rev=ml-segv2\n",
+                  signum, info ? info->si_code : -1, info ? info->si_addr : NULL,
+                  (void *)pc, (void *)lr, (void *)fp, (void *)sp,
+                  (void *)&madeira_segv_report );
+    if (n > 0) write( STDERR_FILENO, buf, n );
+
+    {   /* caller chain through frame pointers, bounded */
+        unsigned long *p = (unsigned long *)fp;
+        for (i = 0; i < 20 && p; i++)
+        {
+            unsigned long next, ret;
+            if (((unsigned long)p & 7) || (unsigned long)p < sp || (unsigned long)p > sp + 0x800000) break;
+            next = p[0]; ret = p[1];
+            n = snprintf( buf, sizeof(buf), "[segv] #%d fp=%p ret=%p rev=ml-segv2\n", i, (void *)p, (void *)ret );
+            if (n > 0) write( STDERR_FILENO, buf, n );
+            if (next <= (unsigned long)p) break;
+            p = (unsigned long *)next;
+        }
+    }
+    _exit( 77 );
+}
+
+static void madeira_segv_install( void )
+{
+    struct sigaction sa;
+    memset( &sa, 0, sizeof(sa) );
+    sa.sa_sigaction = madeira_segv_report;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset( &sa.sa_mask );
+    if (!sigaction( SIGSEGV, &sa, NULL ))
+        wine_log_write("[segv] handler installed rev=ml-segv2");
+    else
+        wine_log_write("[segv] handler install FAILED errno=%d rev=ml-segv2", errno);
+}
+#endif
+
+
 static int init_thread_pipe(void)
 {
     int reply_pipe[2];
@@ -5576,6 +5671,7 @@ static int init_thread_pipe(void)
     /* ml-diag1: this function is where every launch of this build stops, and the
      * crash is caught by the wineserver SIGSEGV handler, which cannot say which
      * line. Log every step so the next log names it. */
+    madeira_segv_install();
     wine_log_write("[pipe-diag] enter thread=%p rev=ml-diag1", (void *)pthread_self());
     madeira_sstack = get_signal_stack();
     wine_log_write("[pipe-diag] signal_stack=%p size=%d rev=ml-diag1", madeira_sstack, (int)signal_stack_size);
@@ -5596,6 +5692,7 @@ static int init_thread_pipe(void)
         server_protocol_perror( "no thread data" );
     }
 
+    madeira_segv_install();
     if (server_pipe( reply_pipe ) == -1) server_protocol_perror( "pipe" );
     wine_log_write("[pipe-diag] reply_pipe=%d/%d rev=ml-diag1", reply_pipe[0], reply_pipe[1]);
 
