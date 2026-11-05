@@ -63,6 +63,8 @@ compile_one() {
         echo "FAILED"
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
+        # ml-diag: the compiler output goes to .err; echo it so CI logs show the cause
+        sed -e 's/^/      | /' "$OBJ_DIR/$name.err" | head -60
     fi
 }
 
@@ -99,6 +101,8 @@ compile_unixlib() {
         echo "FAILED"
         FAILED=$((FAILED + 1))
         FAILED_FILES="$FAILED_FILES $name"
+        # ml-diag: the compiler output goes to .err; echo it so CI logs show the cause
+        sed -e 's/^/      | /' "$OBJ_DIR/$name.err" | head -60
     fi
 }
 
